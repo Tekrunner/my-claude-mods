@@ -1,0 +1,6 @@
+{
+  "name": "limits-band",
+  "version": "0.1.0",
+  "description": "Always-visible 5-hour and weekly usage limits above the prompt",
+  "types": "./types/index.d.ts"
+}

@@ -1,0 +1,21 @@
+{
+  "name": "yann-mods",
+  "owner": { "name": "Yann Fontana" },
+  "plugins": [
+    {
+      "name": "limits-band",
+      "source": "./mods/limits-band",
+      "description": "Always-visible 5-hour and weekly usage limits above the prompt"
+    },
+    {
+      "name": "token-usage",
+      "source": "./mods/token-usage",
+      "description": "Each turn's input / cache write / cache read / output tokens and cache hit rate under its answer"
+    },
+    {
+      "name": "md-review",
+      "source": "./mods/md-review",
+      "description": "Review markdown files line by line or block by block, leaving <!-- REVIEW --> comments in the file"
+    }
+  ]
+}

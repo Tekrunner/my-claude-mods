@@ -1,0 +1,14 @@
+{
+  "name": "md-review",
+  "version": "0.1.0",
+  "description": "Review markdown files line by line, leaving <!-- REVIEW --> comments in the file",
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "handle": {
+      "type": "string",
+      "title": "Reviewer handle",
+      "description": "Handle written in each review comment, without the @",
+      "default": "yfontana"
+    }
+  }
+}
