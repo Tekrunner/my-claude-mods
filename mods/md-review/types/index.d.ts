@@ -10,8 +10,8 @@ export type ReviewEditing = { kind: 'new' | 'edit'; line: number; from: string }
 
 export type ReviewMode = 'rendered' | 'source'
 
-/** The file picker while it is shown: the project's markdown files and the filter typed. */
-export type ReviewPicker = { files: { path: string; mtimeMs: number }[]; filter: string; isTruncated: boolean } | null
+/** The file picker while it is shown: the project's root, its markdown files (relative to it) and the filter typed. */
+export type ReviewPicker = { root: string; files: { path: string; mtimeMs: number }[]; filter: string; isTruncated: boolean } | null
 
 declare module 'claude-code' {
   interface PluginState {

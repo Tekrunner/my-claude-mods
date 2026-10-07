@@ -13,7 +13,7 @@ import {
   replaceComment,
   splitLines,
 } from './comments'
-import { age, filterFiles, isMarkdown, isSkippedFolder } from './files'
+import { age, filterFiles, isMarkdown, isSkippedFolder, joinPath, parentOf } from './files'
 import type { MarkdownFile } from './files'
 
 const PANE = 'md-review'
@@ -43,8 +43,24 @@ function leadingSpace(line: string): string {
   return /^\s*/.exec(line)![0]
 }
 
-/** The project's markdown files, found from the working directory down, skipping hidden and build folders. */
-async function scanMarkdown($: EngineInterface): Promise<{ files: MarkdownFile[]; isTruncated: boolean }> {
+type Scan = { root: string; files: MarkdownFile[]; isTruncated: boolean }
+
+/**
+ * The folder the picker searches: the git repository holding the session's
+ * project root, or that root itself outside a repository. Not the working
+ * directory, which a shell `cd` can leave deep in a subfolder.
+ */
+async function projectRoot($: EngineInterface): Promise<string> {
+  const root = await $.session.root()
+  for (let dir: string | undefined = root; dir !== undefined; dir = parentOf(dir)) {
+    if (await $.fs.exists(joinPath(dir, '.git')).catch(() => false)) return dir
+  }
+  return root
+}
+
+/** The project's markdown files, relative to its root, skipping hidden and build folders. */
+async function scanMarkdown($: EngineInterface): Promise<Scan> {
+  const root = await projectRoot($)
   const files: MarkdownFile[] = []
   let visited = 0
   let isTruncated = false
@@ -53,7 +69,7 @@ async function scanMarkdown($: EngineInterface): Promise<{ files: MarkdownFile[]
       isTruncated = true
       return
     }
-    const entries = await (dir === '' ? $.fs.list() : $.fs.list(dir)).catch(() => [])
+    const entries = await $.fs.list(dir === '' ? root : joinPath(root, dir)).catch(() => [])
     for (const entry of entries) {
       visited += 1
       const path = dir === '' ? entry.name : `${dir}/${entry.name}`
@@ -62,18 +78,18 @@ async function scanMarkdown($: EngineInterface): Promise<{ files: MarkdownFile[]
     }
   }
   await walk('', 0)
-  return { files, isTruncated }
+  return { root, files, isTruncated }
 }
 
 /** Shows the file picker, filtered by `filter`; `found` saves a second search when the caller already made one. */
 async function showPicker(
   $: EngineInterface,
   filter: string,
-  found?: { files: MarkdownFile[]; isTruncated: boolean },
+  found?: Scan,
 ): Promise<void> {
-  const { files, isTruncated } = found ?? (await scanMarkdown($))
+  const { root, files, isTruncated } = found ?? (await scanMarkdown($))
   await update($, editing, () => null)
-  await update($, picker, () => ({ files, filter, isTruncated }))
+  await update($, picker, () => ({ root, files, filter, isTruncated }))
   await $.ui.open({ id: PANE, title: 'Review: pick a file', focus: true })
   await focusOn($, 'filter')
 }
@@ -130,6 +146,9 @@ async function commit(
   await update($, file, f => (f === null ? f : { ...f, mtimeMs }))
 }
 
+const NO_HANDLE =
+  'md-review: set your reviewer handle first, in /config or under pluginConfigs in ~/.claude/settings.json'
+
 function reviewPrompt(path: string, count: number): string {
   return (
     `I've reviewed ${path}. My ${count} review comment(s) are in the file as HTML comments ` +
@@ -179,7 +198,8 @@ async function stopEditing($: EngineInterface, from: string | undefined): Promis
 }
 
 export const register: Register = (on, options) => {
-  const handle = String(options.handle ?? 'yfontana')
+  // No default: each person signs their comments with their own handle.
+  const handle = typeof options.handle === 'string' && options.handle.trim() !== '' ? options.handle : undefined
 
   on('session.start', async ($, e, next) => {
     await $.command.register({
@@ -202,17 +222,19 @@ export const register: Register = (on, options) => {
         await showPicker($, '')
         return { text: 'Pick a file to review.' }
       }
-      const isFile = await $.fs.stat(query).then(stat => stat.kind === 'file', () => false)
-      const path = isFile ? query : undefined
+      const isFile = (path: string) => $.fs.stat(path).then(stat => stat.kind === 'file', () => false)
+      // A path is the working directory's, or else the project root's.
+      const fromRoot = joinPath(await projectRoot($), query)
+      const path = (await isFile(query)) ? query : (await isFile(fromRoot)) ? fromRoot : undefined
       if (path !== undefined) {
         const loaded = await openFile($, path)
-        return { text: `Reviewing ${path} (${countComments(loaded.lines)} comment(s) so far).` }
+        return { text: `Reviewing ${query} (${countComments(loaded.lines)} comment(s) so far).` }
       }
       // Not a file: a part of a name. One match opens; otherwise the picker shows the matches.
       const found = await scanMarkdown($)
       const matching = filterFiles(found.files, query)
       if (matching.length === 1) {
-        const loaded = await openFile($, matching[0]!.path)
+        const loaded = await openFile($, joinPath(found.root, matching[0]!.path))
         return { text: `Reviewing ${matching[0]!.path} (${countComments(loaded.lines)} comment(s) so far).` }
       }
       await showPicker($, query, found)
@@ -254,7 +276,7 @@ export const register: Register = (on, options) => {
               submitLabel="open"
               autoFocus
               onInput={text => void update($, picker, p => (p === null ? p : { ...p, filter: text }))}
-              onSubmit={() => void (matching[0] && openFile($, matching[0].path))}
+              onSubmit={() => void (matching[0] && openFile($, joinPath(picking.root, matching[0].path)))}
             />
           </Box>
           <Box flexDirection="row" gap={1} marginBottom={1}>
@@ -266,7 +288,7 @@ export const register: Register = (on, options) => {
           {matching.length === 0 && <Text dimColor>No markdown file matches.</Text>}
           {matching.slice(0, PICKER_ROWS).map((one, index) => (
             <Box key={`file-row:${index}`} flexDirection="row">
-              <Button key={`file:${index}`} label={one.path} plain onPress={() => openFile($, one.path)} />
+              <Button key={`file:${index}`} label={one.path} plain onPress={() => openFile($, joinPath(picking.root, one.path))} />
               <Text dimColor> · {age(one.mtimeMs, nowMs)}</Text>
             </Box>
           ))}
@@ -302,8 +324,11 @@ export const register: Register = (on, options) => {
     const now = async () => localDate(await $.clock.now())
 
     const startNew = (line: number, from: number) =>
-      startEditing($, { kind: 'new', line: anchorFor(blocks, line), from: `ln:${from}` })
-    const startEdit = (line: number) => startEditing($, { kind: 'edit', line, from: `ln:${line}` })
+      handle === undefined
+        ? $.ui.toast(NO_HANDLE)
+        : startEditing($, { kind: 'new', line: anchorFor(blocks, line), from: `ln:${from}` })
+    const startEdit = (line: number) =>
+      handle === undefined ? $.ui.toast(NO_HANDLE) : startEditing($, { kind: 'edit', line, from: `ln:${line}` })
 
     const commentInput = (value: string, onSubmit: (text: string) => Promise<void>, label: string) => (
       <Box key="comment-row" flexDirection="row" marginLeft={width + 1}>
@@ -325,7 +350,7 @@ export const register: Register = (on, options) => {
       const block = blockAt(blocks, anchor)
       return commentInput('', async text => {
         if (text.trim() === '') return void (await close())
-        const comment = commentIndent(block, lines) + formatComment(handle, await now(), text)
+        const comment = commentIndent(block, lines) + formatComment(handle!, await now(), text)
         await commit($, current, anchor, ls => addComment(ls, anchor, comment))
         await close()
       }, 'comment: ')
@@ -334,7 +359,7 @@ export const register: Register = (on, options) => {
     const editCommentInput = (i: number) =>
       commentInput(parseComment(lines[i]!)!.text, async typed => {
         const replacement =
-          typed.trim() === '' ? undefined : leadingSpace(lines[i]!) + formatComment(handle, await now(), typed)
+          typed.trim() === '' ? undefined : leadingSpace(lines[i]!) + formatComment(handle!, await now(), typed)
         await commit($, current, i, ls => replaceComment(ls, i, replacement))
         await close()
       }, 'edit: ')
@@ -415,6 +440,13 @@ export const register: Register = (on, options) => {
             {current.path} · {countComments(lines)} comment(s) · click a line number to comment, or a comment's to edit it{' '}
           </Text>
         </Box>
+        {handle === undefined && (
+          <Box marginBottom={1}>
+            <Text color="yellow" wrap="wrap">
+              Set your reviewer handle to comment: in /config, or under pluginConfigs in ~/.claude/settings.json.
+            </Text>
+          </Box>
+        )}
         <Box flexDirection="row" gap={1} marginBottom={1}>
           <Button key="done" label="Send to Claude" variant="primary" onPress={() => void sendToClaude($).then(t => $.ui.toast(t))} />
           <Button

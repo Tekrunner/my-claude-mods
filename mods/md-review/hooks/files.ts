@@ -39,6 +39,20 @@ export function filterFiles(files: readonly MarkdownFile[], filter: string): Mar
   return files.filter(file => matches(file.path, filter)).sort((a, b) => b.mtimeMs - a.mtimeMs)
 }
 
+/** The folder holding `path`, or undefined at the top of the drive. */
+export function parentOf(path: string): string | undefined {
+  const trimmed = path.replace(/[\\/]+$/, '')
+  const cut = Math.max(trimmed.lastIndexOf('/'), trimmed.lastIndexOf('\\'))
+  if (cut <= 0 || /^[A-Za-z]:$/.test(trimmed)) return undefined
+  const parent = trimmed.slice(0, cut)
+  // "C:" alone means the drive's current folder: keep its root's slash.
+  return /^[A-Za-z]:$/.test(parent) ? parent + trimmed[cut] : parent
+}
+
+export function joinPath(dir: string, path: string): string {
+  return /[\\/]$/.test(dir) ? dir + path : `${dir}/${path}`
+}
+
 export function age(mtimeMs: number, nowMs: number): string {
   const minutes = Math.floor((nowMs - mtimeMs) / 60000)
   if (minutes < 1) return 'just now'

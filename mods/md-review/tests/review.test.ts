@@ -4,7 +4,7 @@ import type { Engine } from 'claude-code/testing'
 
 import { anchorFor, blockSource, commentIndent, splitBlocks } from '../hooks/blocks'
 import { addComment, formatComment, parseComment, replaceComment } from '../hooks/comments'
-import { age, filterFiles, isMarkdown, isSkippedFolder, matches } from '../hooks/files'
+import { age, filterFiles, isMarkdown, isSkippedFolder, joinPath, matches, parentOf } from '../hooks/files'
 
 describe('comment helpers', () => {
   test('formats and parses a comment', () => {
@@ -47,6 +47,16 @@ describe('file matching', () => {
     expect(isSkippedFolder('_bmad-output')).toBe(false)
     expect(isMarkdown('README.MD')).toBe(true)
     expect(isMarkdown('notes.txt')).toBe(false)
+  })
+
+  test('walks up folders, stopping at the top of the drive', () => {
+    expect(parentOf('C:\\Users\\me\\proj')).toBe('C:\\Users\\me')
+    expect(parentOf('C:\\Users')).toBe('C:\\')
+    expect(parentOf('C:\\')).toBeUndefined()
+    expect(parentOf('/home/me/proj/')).toBe('/home/me')
+    expect(parentOf('/home')).toBeUndefined()
+    expect(joinPath('C:\\', '.git')).toBe('C:\\.git')
+    expect(joinPath('/home/me', 'a.md')).toBe('/home/me/a.md')
   })
 })
 
@@ -124,6 +134,8 @@ async function open(
   initial: string,
   args = 'doc.md',
   others: Record<string, string> = {},
+  // The session's project root, and the repository above it.
+  root = '/proj',
 ) {
   const disk = new Map<string, { text: string; mtimeMs: number }>([['doc.md', { text: initial, mtimeMs: 1 }]])
   Object.entries(others).forEach(([path, text], index) => disk.set(path, { text, mtimeMs: 100 + index }))
@@ -150,6 +162,9 @@ async function open(
     return { value: { kind: 'file', size: text.length, mtimeMs, isLink: false } }
   })
   on('fs.list', ($, e) => {
+    // The disk is the repository at /proj; any other folder there is empty.
+    const isTop = ['', '.'].includes(e.path ?? '') || norm(e.path!).endsWith('/proj')
+    if (!isTop && folderAt(e.path ?? '') === '') return { value: [] }
     const dir = folderAt(e.path ?? '')
     const prefix = dir === '' ? '' : dir + '/'
     const names = new Map<string, 'file' | 'dir'>()
@@ -168,8 +183,11 @@ async function open(
       })),
     }
   })
+  on('session.root', () => ({ value: root }))
+  on('fs.exists', ($, e) => ({ value: norm(e.path).endsWith('/proj/.git') }))
   on('ui.focus', () => ({}))
-  on('ui.toast', () => ({ value: undefined }))
+  const toasts: string[] = []
+  on('ui.toast', ($, e) => (toasts.push(e.text), { value: undefined }))
   on('ui.open', () => ({ value: { isPlaced: true } }))
   const clock = mock.clock(on)
   on('command.register', ($, e) => ({ value: { command: e.name } }))
@@ -183,13 +201,13 @@ async function open(
   })
   const ui = await $.ui.mount({ plugin: 'md-review', surface, component: 'Pane', requestId: 'md-review', props: PANE_PROPS })
   const edit = (next: string) => disk.set('doc.md', { text: next, mtimeMs: disk.get('doc.md')!.mtimeMs + 1 })
-  return { ui, clock, edit, ran, text: () => disk.get('doc.md')!.text }
+  return { ui, clock, edit, ran, toasts, text: () => disk.get('doc.md')!.text }
 }
 
 const COMMENT = (body: string) => new RegExp(`<!-- REVIEW @yfontana \\d{4}-\\d{2}-\\d{2}: ${body} -->`)
 
 for (const surface of ['terminal', 'desktop'] as const) {
-  test(`source view: adds, edits and deletes a comment on ${surface}`, { timeoutMs: 20000 }, async ($, on) => {
+  test(`source view: adds, edits and deletes a comment on ${surface}`, { timeoutMs: 20000, options: { handle: 'yfontana' } }, async ($, on) => {
     const { ui, text } = await open($, on, surface, '# Title\r\nFirst line\r\n')
     await ui.press({ key: 'mode' })
 
@@ -208,7 +226,7 @@ for (const surface of ['terminal', 'desktop'] as const) {
     await ui.unmount()
   })
 
-  test(`source view: a comment inside a table goes after it on ${surface}`, { timeoutMs: 20000 }, async ($, on) => {
+  test(`source view: a comment inside a table goes after it on ${surface}`, { timeoutMs: 20000, options: { handle: 'yfontana' } }, async ($, on) => {
     const { ui, text } = await open($, on, surface, '| a |\n|---|\n| 1 |\nafter\n')
     await ui.press({ key: 'mode' })
     await ui.press({ key: 'ln:1' })
@@ -217,7 +235,7 @@ for (const surface of ['terminal', 'desktop'] as const) {
     await ui.unmount()
   })
 
-  test(`rendered view: comments on a block and edits the comment on ${surface}`, { timeoutMs: 20000 }, async ($, on) => {
+  test(`rendered view: comments on a block and edits the comment on ${surface}`, { timeoutMs: 20000, options: { handle: 'yfontana' } }, async ($, on) => {
     const { ui, text } = await open($, on, surface, '# Title\n\nPara one\ncontinues\n\n- item\n')
 
     await ui.press({ key: 'ln:2' })
@@ -235,7 +253,7 @@ for (const surface of ['terminal', 'desktop'] as const) {
     await ui.unmount()
   })
 
-  test(`reloads when the file changes elsewhere on ${surface}`, { timeoutMs: 20000 }, async ($, on) => {
+  test(`reloads when the file changes elsewhere on ${surface}`, { timeoutMs: 20000, options: { handle: 'yfontana' } }, async ($, on) => {
     const { ui, clock, edit } = await open($, on, surface, 'one\n')
     // The poll starts with the session; a test raises that itself.
     await $.session.start({ cwd: '.', surface, isInteractive: true })
@@ -243,6 +261,15 @@ for (const surface of ['terminal', 'desktop'] as const) {
     edit('one\n\ntwo\n')
     await clock.advance(2000)
     expect(await ui.find({ key: 'ln:2' })).toBeDefined()
+    await ui.unmount()
+  })
+
+  test(`without a handle, asks for one instead of commenting on ${surface}`, { timeoutMs: 20000 }, async ($, on) => {
+    const { ui, text, toasts } = await open($, on, surface, '# Title\nFirst line\n')
+    await ui.press({ key: 'ln:1' })
+    expect(await ui.find({ key: 'comment' })).toBeUndefined()
+    expect(toasts.join('\n')).toContain('set your reviewer handle')
+    expect(text()).toBe('# Title\nFirst line\n')
     await ui.unmount()
   })
 
@@ -254,14 +281,14 @@ for (const surface of ['terminal', 'desktop'] as const) {
     'docs/plan-b.md': '# Plan B\n',
   }
 
-  test(`a unique part of a name opens the file on ${surface}`, { timeoutMs: 20000 }, async ($, on) => {
+  test(`a unique part of a name opens the file on ${surface}`, { timeoutMs: 20000, options: { handle: 'yfontana' } }, async ($, on) => {
     const { ui, ran } = await open($, on, surface, '# Doc\n', 'plan-a', PROJECT)
     expect(ran.text).toContain('Reviewing docs/plan-a.md')
     expect(await ui.find({ key: 'files' })).toBeDefined()
     await ui.unmount()
   })
 
-  test(`several matches show the picker, newest first, on ${surface}`, { timeoutMs: 20000 }, async ($, on) => {
+  test(`several matches show the picker, newest first, on ${surface}`, { timeoutMs: 20000, options: { handle: 'yfontana' } }, async ($, on) => {
     const { ui, ran } = await open($, on, surface, '# Doc\n', 'plan', PROJECT)
     expect(ran.text).toContain('2 markdown files match')
     expect((await ui.find({ key: 'file:0' }))?.text).toContain('docs/plan-b.md')
@@ -272,7 +299,7 @@ for (const surface of ['terminal', 'desktop'] as const) {
     await ui.unmount()
   })
 
-  test(`no argument lists every markdown file and filters as you type on ${surface}`, { timeoutMs: 20000 }, async ($, on) => {
+  test(`no argument lists every markdown file and filters as you type on ${surface}`, { timeoutMs: 20000, options: { handle: 'yfontana' } }, async ($, on) => {
     const { ui } = await open($, on, surface, '# Doc\n', '', PROJECT)
     // doc.md and the two plans; not notes.txt, nor anything under node_modules or .git.
     expect(await ui.find({ key: 'file:2' })).toBeDefined()
@@ -282,6 +309,15 @@ for (const surface of ['terminal', 'desktop'] as const) {
     expect(await ui.find({ key: 'file:1' })).toBeUndefined()
     await ui.input({ key: 'filter', text: 'docs b' })
     expect(await ui.find({ key: 'files' })).toBeDefined()
+    await ui.unmount()
+  })
+
+  test(`searches the whole repository from a session rooted below it on ${surface}`, { timeoutMs: 20000, options: { handle: 'yfontana' } }, async ($, on) => {
+    const { ui } = await open($, on, surface, '# Doc\n', '', PROJECT, '/proj/docs/deep')
+    // doc.md at the repository's top is listed too, not only what is under docs/deep.
+    expect(await ui.find({ key: 'file:2' })).toBeDefined()
+    await ui.input({ key: 'filter', text: 'doc.md', kind: 'change' })
+    expect((await ui.find({ key: 'file:0' }))?.text).toContain('doc.md')
     await ui.unmount()
   })
 }
